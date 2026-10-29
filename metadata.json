@@ -1,0 +1,6 @@
+{
+  "name": "Rising Star Trend Engine",
+  "description": "Modular micro-services trend engine featuring DataConnector ingestion, Pydantic v2 schemas, technical breakouts, and test suite.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
