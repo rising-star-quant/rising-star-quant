@@ -1,12 +1,19 @@
 """
-Rising Star Trend Engine - Core Micro-Modules (Sprint 2: Atomic Engines)
+Rising Star Trend Engine - Core Micro-Modules (Sprint 3: ScoringEngine & RiskGuard)
+Strictly headless pure backend logic.
 """
 
 from .dataconnector import DataConnector
 from .ruleengine import RuleEngine, CompanyProfile, EligibilityResult
 from .indicatorengine import IndicatorEngine, IndicatorMetrics, TechnicalTrend, VolumeMetrics
-from .scoringengine import ScoringEngine
-from .riskguard import RiskGuard
+from .scoringengine import (
+    ScoringEngine,
+    ScorePayload,
+    ScoreFactorBreakdown,
+    HistoricalSignal,
+    GatekeeperResult,
+)
+from .riskguard import RiskGuard, PositionState, RiskStatusPayload
 from .notificationhub import NotificationHub
 
 __all__ = [
@@ -19,6 +26,12 @@ __all__ = [
     "TechnicalTrend",
     "VolumeMetrics",
     "ScoringEngine",
+    "ScorePayload",
+    "ScoreFactorBreakdown",
+    "HistoricalSignal",
+    "GatekeeperResult",
     "RiskGuard",
+    "PositionState",
+    "RiskStatusPayload",
     "NotificationHub",
 ]
