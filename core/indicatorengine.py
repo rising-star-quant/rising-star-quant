@@ -6,6 +6,10 @@ Calculates:
 - Institutional volume accumulation (up-day vs down-day volume surge >= 30%)
 - 20-day resistance levels and 52-week high breakout triggers
 - Relative sector / benchmark performance strength
+
+Refactored to eliminate Pandas FutureWarning deprecation notices:
+- All positional index lookups on Series use explicit .iloc[] calls.
+- Provides fallback wrapper for environments where Pandas is not installed.
 """
 
 from __future__ import annotations
@@ -28,6 +32,68 @@ try:
     import talib
 except ImportError:
     talib = None
+
+
+class _SeriesAccessor:
+    """Provides .iloc[] positional indexing fallback when pandas is not installed."""
+    __slots__ = ("_data",)
+
+    def __init__(self, data: Any):
+        self._data = data
+
+    def __getitem__(self, idx: Any) -> Any:
+        if isinstance(idx, slice):
+            return _SeriesWrapper(self._data[idx])
+        return self._data[idx]
+
+
+class _SeriesWrapper:
+    """Lightweight Series wrapper that supports .iloc[] indexing and common Series methods."""
+    __slots__ = ("_data",)
+
+    def __init__(self, data: Any):
+        if hasattr(data, "tolist"):
+            self._data = data.tolist()
+        elif isinstance(data, list):
+            self._data = data
+        else:
+            self._data = list(data)
+
+    def __len__(self) -> int:
+        return len(self._data)
+
+    def __getitem__(self, idx: Any) -> Any:
+        return self._data[idx]
+
+    @property
+    def iloc(self) -> _SeriesAccessor:
+        return _SeriesAccessor(self._data)
+
+    def tolist(self) -> List[Any]:
+        return list(self._data)
+
+    def max(self) -> Any:
+        return max(self._data) if self._data else 0.0
+
+    def min(self) -> Any:
+        return min(self._data) if self._data else 0.0
+
+
+def _to_positional_series(data: Any, dtype: Optional[str] = None) -> Any:
+    """
+    Ensures data is a Series-like object providing explicit .iloc[] positional indexing.
+    Converts inputs (lists, ndarrays, or existing Series) to pd.Series when pandas is available,
+    or wraps them in _SeriesWrapper. Prevents Pandas FutureWarning deprecations.
+    """
+    if data is None:
+        return None
+    if pd is not None:
+        if isinstance(data, pd.Series):
+            return data
+        return pd.Series(data, dtype=dtype)
+    if hasattr(data, "iloc"):
+        return data
+    return _SeriesWrapper(data)
 
 
 class TechnicalTrend(BaseModel):
@@ -103,7 +169,7 @@ class IndicatorMetrics(BaseModel):
 class IndicatorEngine:
     """
     Headless quantitative mathematics module for trend, volume surge, and breakout monitoring.
-    Uses Pandas, NumPy, and TA-Lib with robust pure-math fallback routines.
+    Uses Pandas, NumPy, and TA-Lib with explicit .iloc[] positional indexing to eliminate FutureWarnings.
     """
 
     def __init__(
@@ -115,50 +181,59 @@ class IndicatorEngine:
         self.breakout_tolerance_pct = breakout_tolerance_pct
 
     @staticmethod
-    def _compute_sma(prices: List[float], period: int) -> Optional[List[float]]:
-        """Computes simple moving average using TA-Lib if available, else pure vector logic."""
-        if len(prices) < period:
+    def _compute_sma(prices: Any, period: int) -> Optional[Any]:
+        """
+        Computes simple moving average using TA-Lib or Pandas rolling, returning a Series-like object.
+        """
+        n = len(prices)
+        if n < period:
             return None
+
+        # Convert to list or 1D array if needed
+        price_list: List[float] = [float(x) for x in (prices.tolist() if hasattr(prices, "tolist") else prices)]
 
         if talib is not None and np is not None:
             try:
-                arr = np.array(prices, dtype=np.float64)
+                arr = np.array(price_list, dtype=np.float64)
                 sma_arr = talib.SMA(arr, timeperiod=period)
-                return [float(x) if not np.isnan(x) else 0.0 for x in sma_arr]
+                clean_vals = [float(x) if not np.isnan(x) else 0.0 for x in sma_arr]
+                return _to_positional_series(clean_vals, dtype="float64")
             except Exception:
                 pass
 
         if pd is not None:
             try:
-                s = pd.Series(prices).rolling(window=period).mean()
-                return [float(x) if not pd.isna(x) else 0.0 for x in s.tolist()]
+                s = pd.Series(price_list, dtype="float64").rolling(window=period).mean().fillna(0.0)
+                return s
             except Exception:
                 pass
 
-        # Native vector / rolling window computation
+        # Native vector / rolling window computation fallback
         result: List[float] = []
-        running_sum = sum(prices[:period])
+        running_sum = sum(price_list[:period])
         result.append(running_sum / period)
-        for i in range(period, len(prices)):
-            running_sum += prices[i] - prices[i - period]
+        for i in range(period, n):
+            running_sum += price_list[i] - price_list[i - period]
             result.append(running_sum / period)
         padded = [0.0] * (period - 1) + result
-        return padded
+        return _to_positional_series(padded, dtype="float64")
 
     @staticmethod
-    def _compute_slope(series: List[float], window: int = 20) -> float:
+    def _compute_slope(series: Any, window: int = 20) -> float:
         """
         Calculates the slope of a series over the trailing `window` points.
         Normalized as percentage rate of change per session.
+        Uses explicit .iloc[] indexing to prevent Pandas FutureWarning deprecations.
         """
-        if len(series) < window or series[-window] == 0:
+        s = _to_positional_series(series, dtype="float64")
+        if len(s) < window or s.iloc[-window] == 0:
             return 0.0
 
-        sub = series[-window:]
+        sub = s.iloc[-window:]
         if np is not None:
             try:
                 x = np.arange(window)
-                y = np.array(sub, dtype=np.float64)
+                y = np.array(sub.tolist() if hasattr(sub, "tolist") else sub, dtype=np.float64)
                 coeffs = np.polyfit(x, y, 1)
                 slope_raw = float(coeffs[0])
                 mean_val = float(np.mean(y))
@@ -166,7 +241,8 @@ class IndicatorEngine:
             except Exception:
                 pass
 
-        pct_change = (sub[-1] - sub[0]) / (sub[0] or 1.0)
+        denom = float(sub.iloc[0]) if float(sub.iloc[0]) != 0 else 1.0
+        pct_change = (float(sub.iloc[-1]) - float(sub.iloc[0])) / denom
         return round((pct_change / window) * 100.0, 4)
 
     def calculate_from_df(
@@ -177,51 +253,59 @@ class IndicatorEngine:
     ) -> IndicatorMetrics:
         """
         Direct convenience interface for Pandas DataFrames.
+        Preserves Series objects and uses .iloc[] indexing for warning-free execution.
         Expects columns 'Close', 'High', 'Low', 'Volume' (case-insensitive).
         """
-        cols = {c.lower(): c for c in df.columns}
-        closes = [float(x) for x in df[cols["close"]].dropna().tolist()]
-        highs = [float(x) for x in df[cols["high"]].dropna().tolist()]
-        lows = [float(x) for x in df[cols["low"]].dropna().tolist()]
-        volumes = [int(x) for x in df[cols["volume"]].dropna().tolist()]
+        cols = {str(c).lower(): c for c in df.columns}
+        closes = df[cols["close"]].dropna()
+        highs = df[cols["high"]].dropna()
+        lows = df[cols["low"]].dropna()
+        volumes = df[cols["volume"]].dropna()
 
         bench_closes = None
         if benchmark_df is not None:
-            b_cols = {c.lower(): c for c in benchmark_df.columns}
+            b_cols = {str(c).lower(): c for c in benchmark_df.columns}
             if "close" in b_cols:
-                bench_closes = [float(x) for x in benchmark_df[b_cols["close"]].dropna().tolist()]
+                bench_closes = benchmark_df[b_cols["close"]].dropna()
 
         return self.calculate(ticker, closes, highs, lows, volumes, bench_closes)
 
     def calculate(
         self,
         ticker: str,
-        closes: List[float],
-        highs: List[float],
-        lows: List[float],
-        volumes: List[int],
-        benchmark_closes: Optional[List[float]] = None,
+        closes: Union[List[float], Any],
+        highs: Union[List[float], Any],
+        lows: Union[List[float], Any],
+        volumes: Union[List[int], Any],
+        benchmark_closes: Optional[Union[List[float], Any]] = None,
     ) -> IndicatorMetrics:
         """
         Processes historical OHLCV data (250 daily bars) and returns strictly validated IndicatorMetrics.
+        Uses explicit .iloc[] indexing across all series to prevent Pandas FutureWarning deprecations.
         Pure headless mathematical function with zero UI dependencies.
         """
-        n_bars = len(closes)
+        # Normalize all series to positional-safe objects supporting .iloc[]
+        closes_s = _to_positional_series(closes, dtype="float64")
+        highs_s = _to_positional_series(highs, dtype="float64")
+        lows_s = _to_positional_series(lows, dtype="float64")
+        volumes_s = _to_positional_series(volumes, dtype="int64")
+
+        n_bars = len(closes_s)
         if n_bars < 20:
             raise ValueError(f"IndicatorEngine requires at least 20 historical bars; got {n_bars}.")
 
-        latest_close = float(closes[-1])
-        latest_vol = int(volumes[-1])
+        latest_close = float(closes_s.iloc[-1])
+        latest_vol = int(volumes_s.iloc[-1])
 
         # 1. Moving Averages (50 and 200)
-        ma50_series = self._compute_sma(closes, min(50, n_bars))
-        ma50 = float(ma50_series[-1]) if ma50_series else latest_close
+        ma50_series = self._compute_sma(closes_s, min(50, n_bars))
+        ma50 = float(ma50_series.iloc[-1]) if ma50_series is not None else latest_close
 
-        ma200_series = self._compute_sma(closes, 200) if n_bars >= 200 else None
-        ma200 = float(ma200_series[-1]) if ma200_series else None
+        ma200_series = self._compute_sma(closes_s, 200) if n_bars >= 200 else None
+        ma200 = float(ma200_series.iloc[-1]) if ma200_series is not None else None
 
         # 20-session slope of MA50
-        if ma50_series and len(ma50_series) >= 20:
+        if ma50_series is not None and len(ma50_series) >= 20:
             ma50_slope_20d = self._compute_slope(ma50_series, 20)
         else:
             ma50_slope_20d = 0.0
@@ -248,8 +332,9 @@ class IndicatorEngine:
         down_volumes: List[int] = []
 
         for i in range(1, n_bars):
-            price_change = closes[i] - closes[i - 1]
-            vol = volumes[i]
+            # Positional access using .iloc[] to prevent Pandas warnings/key errors
+            price_change = float(closes_s.iloc[i]) - float(closes_s.iloc[i - 1])
+            vol = int(volumes_s.iloc[i])
             if price_change > 0:
                 up_volumes.append(vol)
             elif price_change < 0:
@@ -269,9 +354,9 @@ class IndicatorEngine:
         )
 
         # 3. 20-Day Resistance & 52-Week High Breakouts
-        recent_20_highs = highs[-20:]
-        resistance_20d = float(max(recent_20_highs))
-        high_52w = float(max(highs))
+        recent_20_highs = highs_s.iloc[-20:]
+        resistance_20d = float(recent_20_highs.max())
+        high_52w = float(highs_s.max())
 
         dist_20d_pct = round(((latest_close - resistance_20d) / resistance_20d) * 100.0, 2)
         dist_52w_pct = round(((latest_close - high_52w) / high_52w) * 100.0, 2)
@@ -292,12 +377,17 @@ class IndicatorEngine:
 
         # 4. Relative Sector Strength
         relative_strength = 0.0
-        if benchmark_closes and len(benchmark_closes) >= 20 and len(benchmark_closes) == n_bars:
-            ticker_return = ((closes[-1] - closes[0]) / closes[0]) * 100.0
-            bench_return = ((benchmark_closes[-1] - benchmark_closes[0]) / benchmark_closes[0]) * 100.0
-            relative_strength = round(ticker_return - bench_return, 2)
+        if benchmark_closes is not None:
+            bench_s = _to_positional_series(benchmark_closes, dtype="float64")
+            if len(bench_s) >= 20 and len(bench_s) == n_bars:
+                first_close = float(closes_s.iloc[0]) or 1.0
+                first_bench = float(bench_s.iloc[0]) or 1.0
+                ticker_return = ((float(closes_s.iloc[-1]) - first_close) / first_close) * 100.0
+                bench_return = ((float(bench_s.iloc[-1]) - first_bench) / first_bench) * 100.0
+                relative_strength = round(ticker_return - bench_return, 2)
         elif n_bars >= 50:
-            fifty_day_return = ((closes[-1] - closes[-50]) / closes[-50]) * 100.0
+            fifty_close = float(closes_s.iloc[-50]) or 1.0
+            fifty_day_return = ((float(closes_s.iloc[-1]) - fifty_close) / fifty_close) * 100.0
             relative_strength = round(fifty_day_return, 2)
 
         return IndicatorMetrics(

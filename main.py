@@ -21,7 +21,13 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from core.dataconnector import DataConnector, MarketData
-from core.ruleengine import CompanyProfile, EligibilityResult, RuleEngine
+from core.ruleengine import (
+    CompanyProfile,
+    EligibilityResult,
+    RuleEngine,
+    build_profile_from_market_data,
+    compute_annual_dollar_volume,
+)
 from core.indicatorengine import IndicatorEngine, IndicatorMetrics
 from core.scoringengine import HistoricalSignal, ScorePayload, ScoringEngine
 from core.riskguard import PositionState, RiskGuard, RiskStatusPayload
@@ -90,18 +96,21 @@ def run_pipeline(
             logger.warning("Skipping %s due to unavailable or insufficient market data", ticker)
             continue
 
-        # 1. RuleEngine Evaluation
-        profile = CompanyProfile(
+        # 1. RuleEngine Evaluation with automated exchange mapping & dollar volume
+        profile = build_profile_from_market_data(
             ticker=ticker,
-            country="US",
-            exchange="NASDAQ",
             market_cap=data.market_cap or 25_000_000_000.0,
-            public_float_pct=0.75,
-            annual_dollar_volume=(data.avg_volume_10d or 1_000_000) * data.latest_close * 252.0,
             net_income_ttm=data.net_income_ttm if data.net_income_ttm is not None else 100_000_000.0,
             net_income_mrq=data.net_income_q1 if data.net_income_q1 is not None else 25_000_000.0,
+            exchange=data.exchange or "NASDAQ",
+            public_float_pct=0.75,
+            closes=data.close_prices,
+            volumes=data.volumes,
+            latest_price=data.latest_close,
+            avg_daily_volume_shares=data.avg_volume_10d,
         )
-        rule_res = rule_engine.evaluate(profile)
+        rule_res = rule_engine.evaluate(profile, closes=data.close_prices, volumes=data.volumes)
+
 
         # 2. IndicatorEngine Calculations
         indicators = indicator_engine.calculate(

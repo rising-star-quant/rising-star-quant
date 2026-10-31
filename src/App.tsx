@@ -105,9 +105,9 @@ class RuleEngine:
         if not is_float:
             failed.append(f"Public Float ({float_pct*100:.1f}% < 50%)")
 
-        # 5. Float-Adjusted Liquidity Ratio > 1.0
+        # 5. Float-Adjusted Liquidity Ratio > 1.0 (with automated dollar volume)
         float_cap = profile.market_cap * float_pct
-        annual_vol = profile.annual_dollar_volume or (profile.avg_daily_volume_shares * (profile.latest_price or 10.0) * 252.0 if profile.avg_daily_volume_shares else float_cap * 1.2)
+        annual_vol = profile.annual_dollar_volume or compute_annual_dollar_volume(closes, volumes)
         ratio = (annual_vol / float_cap) if float_cap > 0 else 0.0
         is_liq = ratio > self.min_liquidity_ratio
         checklist["liquidity_ratio_threshold"] = is_liq
@@ -135,11 +135,12 @@ class RuleEngine:
   indicatorengine: {
     filename: 'indicatorengine.py',
     path: 'core/indicatorengine.py',
-    description: 'Quantitative mathematics module (250 daily bars, MA50 slope, volume surge, breakouts)',
+    description: 'Quantitative mathematics module (Pandas warning-free .iloc[] indexing, MA50 slope, volume surge)',
     language: 'python',
     content: `"""
 Rising Star Trend Engine - Sprint 2: IndicatorEngine Atomic Micro-Module
 Quantitative mathematics module processing historical OHLCV series (250 daily bars).
+Uses explicit .iloc[] positional indexing to eliminate Pandas FutureWarnings.
 """
 
 from __future__ import annotations
@@ -217,24 +218,24 @@ class IndicatorEngine:
         if n < 20:
             raise ValueError("IndicatorEngine requires >= 20 bars")
 
-        latest_c, latest_v = float(closes[-1]), int(volumes[-1])
+        # Positional indexing via .iloc[] prevents Pandas FutureWarning deprecations
+        latest_c = float(closes.iloc[-1])
+        latest_v = int(volumes.iloc[-1])
 
-        ma50 = sum(closes[-50:]) / 50.0 if n >= 50 else latest_c
-        ma200 = sum(closes[-200:]) / 200.0 if n >= 200 else None
-
-        ma50_window = [sum(closes[i-50:i])/50.0 for i in range(n-19, n+1)] if n >= 70 else [ma50]*20
-        slope_20d = ((ma50_window[-1] - ma50_window[0]) / (ma50_window[0] or 1.0)) * 5.0
+        ma50 = float(self._compute_sma(closes, min(50, n)).iloc[-1])
+        ma200 = float(self._compute_sma(closes, 200).iloc[-1]) if n >= 200 else None
+        slope_20d = self._compute_slope(closes, 20)
 
         is_trend_aligned = (latest_c > ma50 > (ma200 or 0)) and (slope_20d > 0)
 
-        up_vols = [volumes[i] for i in range(1, n) if closes[i] > closes[i-1]]
-        dn_vols = [volumes[i] for i in range(1, n) if closes[i] < closes[i-1]]
+        up_vols = [int(volumes.iloc[i]) for i in range(1, n) if closes.iloc[i] > closes.iloc[i-1]]
+        dn_vols = [int(volumes.iloc[i]) for i in range(1, n) if closes.iloc[i] < closes.iloc[i-1]]
         up_avg = sum(up_vols)/len(up_vols) if up_vols else float(latest_v)
         dn_avg = sum(dn_vols)/len(dn_vols) if dn_vols else float(latest_v)
         ratio = up_avg / dn_avg if dn_avg > 0 else 1.0
 
-        res_20d = max(highs[-20:])
-        high_52w = max(highs)
+        res_20d = float(highs.iloc[-20:].max())
+        high_52w = float(highs.max())
         is_breakout = latest_c >= (res_20d * 0.995) or latest_c >= (high_52w * 0.995)
 
         return IndicatorMetrics(

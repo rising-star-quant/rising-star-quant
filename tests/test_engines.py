@@ -6,7 +6,14 @@ Covers 100% of S&P 500 RuleEngine criteria and quantitative IndicatorEngine math
 from datetime import datetime
 import pytest
 
-from core.ruleengine import CompanyProfile, EligibilityResult, RuleEngine
+from core.ruleengine import (
+    CompanyProfile,
+    EligibilityResult,
+    RuleEngine,
+    build_profile_from_market_data,
+    compute_annual_dollar_volume,
+    normalize_exchange_code,
+)
 from core.indicatorengine import IndicatorEngine, IndicatorMetrics, TechnicalTrend, VolumeMetrics
 
 
@@ -182,6 +189,84 @@ class TestRuleEngine:
         assert res.criteria_checklist["gaap_mrq_positive"] is False
         assert any("Most Recent Quarter" in f for f in res.failed_criteria)
 
+    def test_yahoo_exchange_codes_standardized_to_nasdaq_and_nyse(self):
+        # Yahoo Finance returns codes like NMS, NGM, NCM, and NYQ
+        engine = RuleEngine()
+        for yf_code, expected_mapped in [("NMS", "NASDAQ"), ("NGM", "NASDAQ"), ("NCM", "NASDAQ"), ("NYQ", "NYSE")]:
+            profile = CompanyProfile(
+                ticker="TEST",
+                country="US",
+                exchange=yf_code,
+                market_cap=25_000_000_000.0,
+                public_float_pct=0.75,
+                annual_dollar_volume=30_000_000_000.0,
+                net_income_ttm=500_000_000.0,
+                net_income_mrq=120_000_000.0,
+            )
+            assert profile.exchange == expected_mapped
+            res = engine.evaluate(profile)
+            assert res.criteria_checklist["eligible_exchange"] is True
+            assert res.is_eligible is True
+
+    def test_public_float_pct_normalization(self):
+        # Given a float passed as percentage (e.g. 75.0 instead of 0.75)
+        p1 = CompanyProfile(
+            ticker="FLOAT75",
+            country="US",
+            exchange="NASDAQ",
+            market_cap=20_000_000_000.0,
+            public_float_pct=75.0,  # 75% passed as 75.0
+            annual_dollar_volume=25_000_000_000.0,
+            net_income_ttm=100_000_000.0,
+            net_income_mrq=25_000_000.0,
+        )
+        assert p1.public_float_pct == 0.75
+        assert p1.public_float_pct <= 1.0
+
+        p2 = CompanyProfile(
+            ticker="FLOAT_RATIO",
+            country="US",
+            exchange="NYSE",
+            market_cap=20_000_000_000.0,
+            public_float_pct=0.68,
+            annual_dollar_volume=25_000_000_000.0,
+            net_income_ttm=100_000_000.0,
+            net_income_mrq=25_000_000.0,
+        )
+        assert p2.public_float_pct == 0.68
+
+    def test_automated_annual_dollar_volume_calculation(self):
+        # 252 bars with price=100.0 and volume=1,000,000 => daily dollar volume = 100M
+        # Annual dollar volume = 252 * 100M = 25,200,000,000
+        closes = [100.0] * 252
+        volumes = [1_000_000] * 252
+
+        dollar_vol = compute_annual_dollar_volume(closes, volumes, lookback_bars=252)
+        expected = 252 * 100.0 * 1_000_000.0
+        assert dollar_vol == expected
+
+        # Test build_profile_from_market_data factory helper
+        profile = build_profile_from_market_data(
+            ticker="AUTODOL",
+            market_cap=20_000_000_000.0,
+            net_income_ttm=200_000_000.0,
+            net_income_mrq=50_000_000.0,
+            exchange="NMS", # Yahoo code
+            public_float_pct=80.0, # Percentage input
+            closes=closes,
+            volumes=volumes,
+            latest_price=100.0,
+        )
+        assert profile.exchange == "NASDAQ"
+        assert profile.public_float_pct == 0.80
+        assert profile.annual_dollar_volume == expected
+
+        engine = RuleEngine()
+        res = engine.evaluate(profile)
+        assert res.is_eligible is True
+        assert res.criteria_checklist["liquidity_ratio_threshold"] is True
+
+
 
 # =====================================================================
 # Fixtures for IndicatorEngine (250 daily bars)
@@ -356,3 +441,56 @@ class TestIndicatorEngine:
                 lows=[99.0] * 12,
                 volumes=[500_000] * 12,
             )
+
+    def test_indicatorengine_iloc_indexing_no_future_warnings(self, series_250_bars):
+        import warnings
+        engine = IndicatorEngine()
+
+        # Catch all warnings during calculation to verify zero FutureWarnings emitted
+        with warnings.catch_warnings(record=True) as recorded_warnings:
+            warnings.simplefilter("always")
+            metrics = engine.calculate(
+                ticker="CLEAN_INDEXING",
+                closes=series_250_bars["closes"],
+                highs=series_250_bars["highs"],
+                lows=series_250_bars["lows"],
+                volumes=series_250_bars["volumes"],
+            )
+
+            # Filter for any FutureWarnings related to series positional indexing
+            future_warnings = [
+                w for w in recorded_warnings
+                if issubclass(w.category, FutureWarning) and "position" in str(w.message).lower()
+            ]
+            assert len(future_warnings) == 0, f"FutureWarning detected: {future_warnings}"
+            assert metrics.latest_close == series_250_bars["closes"][-1]
+            assert metrics.latest_volume == series_250_bars["volumes"][-1]
+
+    def test_indicatorengine_with_series_and_dict_mock(self, series_250_bars):
+        engine = IndicatorEngine()
+
+        # Test calculate_from_df mock
+        class MockDataFrame:
+            def __init__(self, data_dict):
+                self.data = data_dict
+                self.columns = list(data_dict.keys())
+            def __getitem__(self, col):
+                class MockCol:
+                    def __init__(self, vals):
+                        self.vals = vals
+                    def dropna(self):
+                        return self.vals
+                return MockCol(self.data[col])
+
+        mock_df = MockDataFrame({
+            "Close": series_250_bars["closes"],
+            "High": series_250_bars["highs"],
+            "Low": series_250_bars["lows"],
+            "Volume": series_250_bars["volumes"],
+        })
+
+        metrics = engine.calculate_from_df(mock_df, ticker="DF_TEST")
+        assert metrics.ticker == "DF_TEST"
+        assert metrics.bars_processed == 250
+        assert metrics.latest_close > 0
+

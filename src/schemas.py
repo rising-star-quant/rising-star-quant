@@ -160,3 +160,23 @@ class MarketDataPayload(BaseModel):
         if self.technicals.avg_volume_10d <= 0:
             return 1.0
         return self.technicals.latest_volume / self.technicals.avg_volume_10d
+
+    def compute_annual_dollar_volume(self, lookback_bars: int = 252) -> float:
+        """
+        Calculates trailing annual dollar volume traded directly from historical price & volume:
+        sum(Close * Volume) over the trailing lookback_bars (defaults to 252 sessions).
+        Annualizes proportionally if fewer than 252 bars are available.
+        """
+        closes = self.technicals.close_prices
+        volumes = self.technicals.volumes
+        n = min(len(closes), len(volumes))
+        if n == 0:
+            return 0.0
+
+        bars = min(n, lookback_bars)
+        start_idx = n - bars
+        total_vol = sum(closes[i] * volumes[i] for i in range(start_idx, n))
+        if 0 < bars < 252:
+            total_vol = (total_vol / bars) * 252.0
+        return round(total_vol, 2)
+

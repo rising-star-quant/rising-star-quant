@@ -38,6 +38,7 @@ class MarketData:
     net_income_ttm: Optional[float] = None
     short_interest_pct: Optional[float] = None
     avg_volume_10d: Optional[float] = None
+    exchange: Optional[str] = None
 
 
 class DataConnector:
@@ -139,6 +140,7 @@ class DataConnector:
             short_interest_pct = info.get("shortPercentOfFloat")
             avg_volume_10d = info.get("averageDailyVolume10Day") or info.get("averageVolume10days")
             net_income_ttm = info.get("netIncomeToCommon")
+            raw_exchange = info.get("exchange")
 
             # Extract quarterly net income
             net_income_q1 = None
@@ -164,6 +166,8 @@ class DataConnector:
                 net_income_ttm=float(net_income_ttm) if net_income_ttm is not None else None,
                 short_interest_pct=float(short_interest_pct) if short_interest_pct is not None else None,
                 avg_volume_10d=float(avg_volume_10d) if avg_volume_10d is not None else None,
+                exchange=str(raw_exchange) if raw_exchange else None,
             )
+
 
         return self._execute_with_retry(f"fetch_ticker_data({clean_ticker})", _fetch)

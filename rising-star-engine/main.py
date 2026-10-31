@@ -21,7 +21,13 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from core.dataconnector import DataConnector, MarketData
-from core.ruleengine import CompanyProfile, EligibilityResult, RuleEngine
+from core.ruleengine import (
+    CompanyProfile,
+    EligibilityResult,
+    RuleEngine,
+    build_profile_from_market_data,
+    compute_annual_dollar_volume,
+)
 from core.indicatorengine import IndicatorEngine, IndicatorMetrics
 from core.scoringengine import HistoricalSignal, ScorePayload, ScoringEngine
 from core.riskguard import PositionState, RiskGuard, RiskStatusPayload
@@ -36,6 +42,7 @@ logger = logging.getLogger("RisingStarEngine")
 
 
 def load_watchlist(filepath: str = "watchlist.csv") -> List[str]:
+    """Reads ticker symbols from CSV file or falls back to defaults."""
     tickers: List[str] = []
     if os.path.exists(filepath):
         try:
@@ -62,6 +69,7 @@ def run_pipeline(
     output_json: str = "scan_results.json",
     output_csv: str = "scan_results.csv",
 ) -> List[Dict[str, Any]]:
+    """Runs the full headless scan pipeline across all tickers."""
     start_time = datetime.utcnow()
     logger.info("==================================================================")
     logger.info("🚀 STARTING HEADLESS RISING STAR TREND ENGINE (UTC: %s)", start_time.strftime("%Y-%m-%d %H:%M:%S"))
@@ -88,18 +96,22 @@ def run_pipeline(
             logger.warning("Skipping %s due to unavailable or insufficient market data", ticker)
             continue
 
-        profile = CompanyProfile(
+        # 1. RuleEngine Evaluation with automated exchange mapping & dollar volume
+        profile = build_profile_from_market_data(
             ticker=ticker,
-            country="US",
-            exchange="NASDAQ",
             market_cap=data.market_cap or 25_000_000_000.0,
-            public_float_pct=0.75,
-            annual_dollar_volume=(data.avg_volume_10d or 1_000_000) * data.latest_close * 252.0,
             net_income_ttm=data.net_income_ttm if data.net_income_ttm is not None else 100_000_000.0,
             net_income_mrq=data.net_income_q1 if data.net_income_q1 is not None else 25_000_000.0,
+            exchange=data.exchange or "NASDAQ",
+            public_float_pct=0.75,
+            closes=data.close_prices,
+            volumes=data.volumes,
+            latest_price=data.latest_close,
+            avg_daily_volume_shares=data.avg_volume_10d,
         )
-        rule_res = rule_engine.evaluate(profile)
+        rule_res = rule_engine.evaluate(profile, closes=data.close_prices, volumes=data.volumes)
 
+        # 2. IndicatorEngine Calculations
         indicators = indicator_engine.calculate(
             ticker=ticker,
             closes=data.close_prices,
@@ -108,6 +120,7 @@ def run_pipeline(
             volumes=data.volumes,
         )
 
+        # 3. ScoringEngine Multi-Factor Evaluation & Gatekeeper
         score_payload = scoring_engine.calculate_score(
             indicators=indicators,
             rule_result=rule_res,
@@ -152,6 +165,7 @@ def run_pipeline(
         }
         results.append(record)
 
+        # 4. Telegram Alert Dispatching on Confirmed BUY ALERT
         if send_telegram and score_payload.is_buy_alert and notification_hub.is_configured:
             msg = (
                 f"🔥 <b>RISING STAR BUY ALERT</b>\n\n"
@@ -169,6 +183,7 @@ def run_pipeline(
 
     results.sort(key=lambda x: x.get("score", 0), reverse=True)
 
+    # Export scan results
     try:
         with open(output_json, "w", encoding="utf-8") as f:
             json.dump(results, f, indent=2)
