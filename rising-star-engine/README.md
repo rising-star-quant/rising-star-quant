@@ -1,6 +1,6 @@
-# 🌟 Rising Star Trend Engine (מנוע גילוי מניות מומנטום)
+# 🌟 Rising Star Trend Engine (מנוע גילוי מניות מומנטום וסריקה כמותית)
 
-מערכת מיקרו-מודולרית מבוססת פייתון לגילוי, סינון, דירוג וניהול סיכונים עבור מניות מומנטום פורצות (Rising Stars), כוללת סריקה אוטומטית בענן עם GitHub Actions והתראות טלגרם בזמן אמת.
+מערכת מיקרו-מודולרית מבוססת פייתון (Strictly Headless Backend) לגילוי, סינון, דירוג, ניהול סיכונים, בקטסטינג היסטורי וסחר מדומה (Paper Trading) עבור מניות מומנטום פורצות (Rising Stars), כוללת סריקה אוטומטית בענן עם GitHub Actions, דשבורד ניטור אינטראקטיבי, והתראות טלגרם בזמן אמת.
 
 ---
 
@@ -10,99 +10,110 @@
 rising-star-engine/
 ├── .github/
 │   └── workflows/
-│       └── run_engine.yml        # קובץ ההפעלה האוטומטי בענן (GitHub Actions)
-├── core/                         # תיקיית המיקרו-מודולים
+│       ├── quant_scan.yml        # קובץ ההפעלה האוטומטי בענן (21:30 UTC אחרי סגירת וול סטריט)
+│       └── run_engine.yml        # תאימות לאחור
+├── core/                         # תיקיית המיקרו-מודולים (Headless Core)
 │   ├── __init__.py
-│   ├── dataconnector.py          # מודול השאיבה (yfinance / exponential backoff)
-│   ├── ruleengine.py             # מודול תנאי הסף של S&P (רווחיות, שווי, נזילות)
-│   ├── indicatorengine.py        # מודול חישובים טכניים (MA50, נפחים, 20d High, ATR)
-│   ├── scoringengine.py          # מודול שקלול הציון (0-100)
-│   ├── riskguard.py              # מודול ניהול סיכונים, סטופ לוס דינמי ויעדי רווח
-│   └── notificationhub.py        # מודול שליחת התראות לטלגרם
-├── tests/                        # תיקיית בדיקות יחידה
-│   └── test_modules.py
+│   ├── dataconnector.py          # מודול השאיבה (yfinance / exponential backoff & jitter)
+│   ├── ruleengine.py             # מודול תנאי הסף של S&P (100% חוקי כשירות פורמליים)
+│   ├── indicatorengine.py        # מודול חישובים טכניים (250 נרות, שיפוע MA50, ווליום, פריצות)
+│   ├── scoringengine.py          # מודול שקלול הציון (40/30/20/10 + Backtest Gatekeeper)
+│   ├── riskguard.py              # מודול ניהול סיכונים, ATR סטופ לוס דינמי ויעדי רווח 1R/2R/3R/5R
+│   ├── universe.py               # מודול שליפת S&P 500, שמירה במטמון וסריקה באצוות
+│   ├── notificationhub.py        # מודול שליחת התראות וסיכומים לטלגרם
+│   ├── backtester.py             # מנוע בקטסטינג היסטורי (Sharpe, Drawdown, Win Rate, Profit Factor)
+│   └── portfoliotracker.py       # מודול מעקב תיק וירטואלי (Paper Trading) ובדיקות סיכון אוטומטיות
+├── scripts/
+│   └── run_nightly_scan.sh       # סקריפט הרצה עצמאי לשרתים / קרון מקומי
+├── tests/                        # תיקיית בדיקות יחידה מלאה (Pytest)
+│   ├── test_engines.py
+│   ├── test_scoring_risk.py
+│   ├── test_sprint4.py
+│   └── test_sprint5.py
+├── backtest.py                   # קובץ CLI עצמאי להרצת בקטסט על מניות נבחרות או S&P 500
+├── main.py                       # הקובץ הראשי שמחבר את הכל ומריץ סריקה ומעקב תיק
+├── portfolio.json                # קובץ סטטוס התיק הווירטואלי (פוזיציות פתוחות, נעולות ויתרות)
+├── scan_results.json             # תוצאות הסריקה העדכניות בפורמט JSON
+├── scan_results.csv              # תוצאות הסריקה בפורמט טבלאי
 ├── watchlist.csv                 # רשימת המניות לסריקה
-├── main.py                       # הקובץ הראשי שמחבר את הכל ומריץ
-├── requirements.txt              # רביזיות וספריות נדרשות (pandas, yfinance, requests...)
+├── requirements.txt              # תלויות פייתון (pandas, yfinance, pydantic, numpy, requests...)
 └── README.md
 ```
 
 ---
 
-## 🧩 המיקרו-מודולים של המערכת
+## 🧩 המיקרו-מודולים של המערכת (Core Engines)
 
 1. **`core/dataconnector.py`**:
-   שואב היסטוריית מחירים יומית (OHLCV) ונתונים פונדמנטליים באמצעות `yfinance` עם לוגיקת Exponential Backoff ו-Jitter להתמודדות עם מגבלות קריאה (HTTP 429).
+   שואב היסטוריית מחירים יומית (OHLCV) ונתונים פונדמנטליים עם לוגיקת Exponential Backoff ו-Jitter להתמודדות איתנה עם הגבלות קצב (HTTP 429).
 
 2. **`core/ruleengine.py`**:
-   מסנן תנאי סף מוסדיים בסגנון מדד S&P:
-   - שווי שוק מינימלי (מעל 1 מיליארד דולר לחברות צמיחה).
-   - רווחיות חיובית מצטברת ב-12 החודשים האחרונים (Positive TTM Net Income).
-   - נזילות מספקת (מחזור דולרי יומי מעל 5 מיליון דולר).
-   - סינון מניות פני (מחיר מעל 5 דולר).
+   מסנן 100% מתנאי הסף הפורמליים של מדד S&P 500:
+   - התאגדות בארה"ב ורישום בבורסות המובילות (NYSE, NASDAQ, Cboe עם מיפוי אוטומטי של קודי Yahoo כמו NMS/NGM/NCM).
+   - שווי שוק מינימלי ($18.0B ומעלה).
+   - יחס נזילות מתואם צף > 1.0 ושיעור מניות צפות מעל 50%.
+   - רווחיות GAAP חיובית ב-4 הרבעונים האחרונים וברבעון האחרון.
 
 3. **`core/indicatorengine.py`**:
-   מחשב ממוצעים נעים (MA20, MA50, MA200), בדיקת פריצת שיא 20 ימים (20d High Breakout), בדיקת התרחבות מחזורים (Volume Surge) ומדד תנודתיות ATR14.
+   מנתח 250 נרות יומיים תוך שימוש בלעדי באינדוקס `.iloc[]` (ללא FutureWarnings):
+   - חישוב MA50, MA200 ושיפוע חיובי ב-20 ימים.
+   - יחס מחזורים בימי עליות מול ירידות (איסוף מוסדי מעל 1.30x).
+   - זיהוי פריצות של שיא 20 ימים ושיא 52 שבועות.
+   - חישוב תנודתיות 14d ATR.
 
 4. **`core/scoringengine.py`**:
-   אלגוריתם שקלול מבוסס 100 נקודות המדרג כל מניה לקטגוריות:
-   - **`STRONG_RISING_STAR` (80-100)**: מובילת מומנטום מובהקת בפריצה עם ווליום חריג.
-   - **`EMERGING_CANDIDATE` (65-79)**: מניה מתקרבת לפריצה באיכות גבוהה.
-   - **`WATCHLIST` (50-64)**: מניה בגיבוש הדורשת מעקב.
-   - **`AVOID` (< 50)**: אינה עומדת בקריטריונים.
+   שקלול מולטי-פקטור נורמלי (0-100):
+   - מגמה טכנית (40%), ווליום מוסדי (30%), סנטימנט סקטוריאלי (20%), שורט אינטרסט (10%).
+   - התראת קנייה (BUY ALERT) בציון 85 ומעלה יחד עם פריצה מאומתת.
+   - שומר סף (Backtest Gatekeeper): Profit Factor $\ge$ 1.20 ו-Win Rate $\ge$ 50%.
 
 5. **`core/riskguard.py`**:
-   תוכנית מסחר וניהול סיכונים א-סימטרית:
-   - חישוב סטופ לוס דינמי המבוסס על ATR ומבנה ה-MA50 (מקסימום סיכון 7.5%).
-   - חישוב יעדי רווח מדורגים: Target 1 (2R), Target 2 (3R), Target 3 (5R).
-   - חישוב גודל פוזיציה מומלץ (כמות מניות לפי תקציב סיכון מוגדר, ברירת מחדל $1,000).
+   ניהול סיכונים מתקדם:
+   - סטופ-לוס דינמי מבוסס ATR(14) כפול 2.0 או Trailing Stop של 10% מהשיא.
+   - יעדי רווח אסימטריים: 1R, 2R, 3R, 5R.
+   - חישוב גודל פוזיציה כמותי לפי תקציב סיכון מוגדר (למשל 1% מתיק של $100,000).
 
-6. **`core/notificationhub.py`**:
-   מפיץ הודעות מעוצבות לטלגרם הכוללות את כרטיס המניה, הציון, הסטופ לוס ויעדי הרווח.
+6. **`core/backtester.py`**:
+   מנוע סימולציה היסטורית רב-שנתית:
+   - הרצה בחלונות נע של 250 ימים.
+   - חישוב מדדי ביצועים: תשואה שנתית, מדד שארפ שנתי (Sharpe Ratio), Drawdown מקסימלי, Win Rate, ו-Profit Factor.
+   - יומן עסקאות מלא וקו עקומת הון (Equity Curve).
+
+7. **`core/portfoliotracker.py`**:
+   ספר פקודות ומעקב אחר תיק וירטואלי (Paper Trading):
+   - פתיחת פוזיציות אוטומטית בהתראות קנייה (Buy Alerts).
+   - בדיקת סיכונים שוטפת (RiskGuard Audit) נגד פריצת סטופ-לוס נגרר או שבירת ממוצע 50.
+   - שמירה וטעינה מובנית מקובץ `portfolio.json`.
+
+8. **`core/universe.py` & `core/notificationhub.py`**:
+   - שאיבת כל 503 מניות S&P 500 מוויקיפדיה עם מטמון מקומי ל-7 ימים.
+   - שליחת כרטיסי התראות מעוצבים ודוח סיכום יומי לטלגרם.
 
 ---
 
-## ⚡ הוראות התקנה והרצה מקומית
+## 🚀 הוראות הרצה (CLI Execution)
 
-### 1. התקנת סביבת עבודה ותלויות:
+### הרצת סריקת שוק מלאה (S&P 500)
 ```bash
-git clone https://github.com/<YOUR_USER>/rising-star-engine.git
-cd rising-star-engine
-
-# יצירת סביבה וירטואלית
-python3 -m venv venv
-source venv/bin/activate  # בווינדוס: venv\Scripts\activate
-
-# התקנת הספריות
-pip install -r requirements.txt
+python main.py --sp500 --equity 100000 --risk-pct 1.0 --batch-size 25
 ```
 
-### 2. הרצת בדיקות יחידה (Unit Tests):
+### הרצת סריקה על Watchlist מותאם אישית
+```bash
+python main.py --watchlist watchlist.csv --equity 100000 --risk-pct 1.0
+```
+
+### הרצת בקטסטינג היסטורי
+```bash
+python backtest.py --tickers NVDA CRWD PLTR AAPL MSFT --capital 100000 --trailing-stop 0.10
+```
+
+### הרצת בדיקות יחידה
 ```bash
 pytest tests/ -v
 ```
 
-### 3. הרצת המנוע:
+### הרצה אוטומטית באמצעות סקריפט לינוקס
 ```bash
-# הרצה רגילה עם רשימת ברירת המחדל
-python main.py
-
-# הרצה עם קובץ Watchlist מותאם אישית
-python main.py --watchlist watchlist.csv --min-score 75
-
-# הרצה ללא שליחת טלגרם (Dry Run)
-python main.py --no-telegram
+./scripts/run_nightly_scan.sh --sp500
 ```
-
----
-
-## 🤖 הפעלה אוטומטית בענן (GitHub Actions)
-
-הקובץ `.github/workflows/run_engine.yml` מוגדר להריץ את המנוע באופן אוטומטי בימי שני עד שישי בשעה 21:30 UTC (לאחר סגירת המסחר בוול-סטריט).
-
-### הגדרת Secrets ב-GitHub עבור טלגרם:
-1. פתח את המאגר שלך ב-GitHub ועבור ל:
-   **Settings > Secrets and variables > Actions > New repository secret**
-2. הוסף שני ערכים:
-   - `TELEGRAM_BOT_TOKEN`: הטוקן שקיבלת מ-BotFather בטלגרם.
-   - `TELEGRAM_CHAT_ID`: ה-ID של הערוץ או הצ'אט הפרטי שלך.

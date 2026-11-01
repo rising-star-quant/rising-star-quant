@@ -1,0 +1,103 @@
+name: Nightly Quant Scan & Risk Audit
+
+on:
+  schedule:
+    # 21:30 UTC = 4:30 PM EST / 5:30 PM EDT (Monday to Friday, post US market close)
+    - cron: '30 21 * * 1-5'
+  workflow_dispatch:
+    inputs:
+      use_sp500:
+        description: 'Scan complete S&P 500 constituents (true) or watchlist (false)'
+        required: true
+        default: 'true'
+        type: boolean
+      ticker_limit:
+        description: 'Limit number of tickers (leave empty for full universe)'
+        required: false
+        default: ''
+        type: string
+      min_score:
+        description: 'Minimum score threshold for Buy Alert'
+        required: false
+        default: '85.0'
+        type: string
+
+jobs:
+  quant_scan:
+    name: Execute Market Scan & Portfolio Audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+          cache: 'pip'
+
+      - name: Install System Libraries & TA-Lib
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential wget
+          if ! python -c "import talib" 2>/dev/null; then
+            echo "Installing TA-Lib C library..."
+            wget -q http://prdownloads.sourceforge.net/ta-lib/ta-lib-0.4.0-src.tar.gz
+            tar -xzf ta-lib-0.4.0-src.tar.gz
+            cd ta-lib/
+            ./configure --prefix=/usr
+            make
+            sudo make install
+            cd ..
+            rm -rf ta-lib ta-lib-0.4.0-src.tar.gz
+          fi
+
+      - name: Install Python Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest
+
+      - name: Run Unit Tests
+        run: |
+          python -m pytest tests/ -v
+
+      - name: Execute Nightly S&P 500 Scan & Risk Audit
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          SCAN_FLAGS="--equity 100000 --risk-pct 1.0 --batch-size 25"
+          
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            if [ "${{ github.event.inputs.use_sp500 }}" = "true" ]; then
+              SCAN_FLAGS="$SCAN_FLAGS --sp500"
+            else
+              SCAN_FLAGS="$SCAN_FLAGS --watchlist watchlist.csv"
+            fi
+            if [ -n "${{ github.event.inputs.ticker_limit }}" ]; then
+              SCAN_FLAGS="$SCAN_FLAGS --limit ${{ github.event.inputs.ticker_limit }}"
+            fi
+            if [ -n "${{ github.event.inputs.min_score }}" ]; then
+              SCAN_FLAGS="$SCAN_FLAGS --min-score ${{ github.event.inputs.min_score }}"
+            fi
+          else
+            # Default scheduled nightly run
+            SCAN_FLAGS="$SCAN_FLAGS --sp500"
+          fi
+
+          echo "Executing: python main.py $SCAN_FLAGS"
+          python main.py $SCAN_FLAGS
+
+      - name: Archive Scan & Portfolio Artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: quant-scan-results-${{ github.run_id }}
+          path: |
+            scan_results.json
+            scan_results.csv
+            portfolio.json
+          retention-days: 30

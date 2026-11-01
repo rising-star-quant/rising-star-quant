@@ -1,5 +1,5 @@
 """
-Rising Star Trend Engine - Main Headless Orchestration Pipeline (Sprint 4: Full Market Integration)
+Rising Star Trend Engine - Main Headless Orchestration Pipeline (Sprint 5: Backtesting, Automation & Portfolio)
 Executes end-to-end institutional scanning:
 1. Full S&P 500 / Watchlist Universe Management & Batch Ingestion
 2. S&P 500 RuleEngine evaluation (100% formal criteria)
@@ -7,6 +7,7 @@ Executes end-to-end institutional scanning:
 4. ScoringEngine (40/30/20/10 multi-factor weighting, BUY ALERT, Backtest Gatekeeper)
 5. Enhanced RiskGuard (14d ATR stops, 1R/2R/3R/5R profit targets, volatility position sizing)
 6. Automated NotificationHub (Actionable Buy Alert cards and Nightly Daily Summary Digest)
+7. Paper Trading & PortfolioTracker (Automated position opening on Buy Alerts & RiskGuard audits)
 """
 
 from __future__ import annotations
@@ -34,6 +35,7 @@ from core.scoringengine import HistoricalSignal, ScorePayload, ScoringEngine
 from core.riskguard import PositionState, RiskGuard, RiskPlan, RiskStatusPayload
 from core.notificationhub import NotificationHub
 from core.universe import BatchMarketScanner, fetch_sp500_tickers, FALLBACK_SP500_TICKERS
+from core.portfoliotracker import PortfolioTracker, PaperPosition
 
 logging.basicConfig(
     level=logging.INFO,
@@ -74,90 +76,100 @@ def run_pipeline(
     risk_per_trade_pct: float = 1.0,
     batch_size: int = 25,
     send_telegram: bool = True,
+    enable_paper_trading: bool = True,
+    portfolio_file: str = "portfolio.json",
     output_json: str = "scan_results.json",
     output_csv: str = "scan_results.csv",
 ) -> List[Dict[str, Any]]:
     """
-    Runs the full production-ready headless market scan pipeline across the selected universe.
-    Handles rate-limits, missing data, and delisted tickers gracefully without breaking.
+    Executes resilient headless batch scan across S&P 500 or custom watchlist with RiskGuard and PortfolioTracker.
     """
     start_ts = time.time()
-    start_time = datetime.utcnow()
-    logger.info("==================================================================")
-    logger.info("🚀 STARTING HEADLESS RISING STAR TREND ENGINE - SPRINT 4 (UTC: %s)", start_time.strftime("%Y-%m-%d %H:%M:%S"))
-    logger.info("==================================================================")
+    logger.info("======================================================================")
+    logger.info("  RISING STAR TREND ENGINE - HEADLESS INSTITUTIONAL SCANNER (SPRINT 5)")
+    logger.info("======================================================================")
 
-    # 1. Select Universe
+    # 1. Resolve Target Universe
     if use_sp500:
         logger.info("Mode: Full S&P 500 Index Universe")
-        tickers = fetch_sp500_tickers(max_tickers=ticker_limit)
+        tickers = fetch_sp500_tickers()
     else:
-        logger.info("Mode: Custom Watchlist File ('%s')", watchlist_file)
+        logger.info("Mode: Custom Watchlist ('%s')", watchlist_file)
         tickers = load_watchlist(watchlist_file)
-        if ticker_limit:
-            tickers = tickers[:ticker_limit]
 
-    logger.info("Universe size: %d tickers to process", len(tickers))
+    if ticker_limit and ticker_limit > 0:
+        tickers = tickers[:ticker_limit]
+        logger.info("Universe capped to first %d tickers by limit flag", len(tickers))
+
+    logger.info("Total assets queued for analysis: %d", len(tickers))
 
     # Initialize micro-modules
-    connector = DataConnector(max_retries=3, backoff_factor=1.5, lookback_days=250)
-    rule_engine = RuleEngine()
+    connector = DataConnector()
     indicator_engine = IndicatorEngine()
-    scoring_engine = ScoringEngine(buy_score_threshold=min_score_alert)
-    risk_guard = RiskGuard(default_account_equity=account_equity, default_risk_per_trade_pct=risk_per_trade_pct)
+    scoring_engine = ScoringEngine()
+    risk_guard = RiskGuard()
     notification_hub = NotificationHub()
-    batch_scanner = BatchMarketScanner(batch_size=batch_size, batch_delay_seconds=0.4)
-
-    results: List[Dict[str, Any]] = []
-    buy_alerts: List[Dict[str, Any]] = []
-    qualified_count = 0
+    batch_scanner = BatchMarketScanner(batch_size=batch_size, delay_between_batches=1.0)
+    
+    portfolio_tracker: Optional[PortfolioTracker] = None
+    if enable_paper_trading:
+        portfolio_tracker = PortfolioTracker(
+            initial_cash=account_equity,
+            storage_file=portfolio_file,
+        )
 
     print("\n" + "=" * 115)
-    print(f"{'TICKER':<8} {'PRICE':<9} {'20D HIGH':<10} {'SURGE':<8} {'SCORE':<7} {'TIER':<20} {'BUY ALERT':<11} {'ATR(14)':<8} {'STOP':<8} {'SHARES'}")
+    print(
+        f"{'TICKER':<8} {'PRICE':<8} {'RESIST':<9} {'VOL_RAT':<8} {'SCORE':<7} "
+        f"{'TIER':<20} {'BUY_ALERT':<11} {'ATR14':<8} {'STOP':<8} {'SIZING'}"
+    )
     print("=" * 115)
+
+    buy_alerts: List[Dict[str, Any]] = []
+    qualified_count = 0
+    latest_quotes: Dict[str, Dict[str, Any]] = {}
 
     def process_ticker(ticker: str) -> Optional[Dict[str, Any]]:
         nonlocal qualified_count
 
-        data = connector.fetch_ticker_data(ticker)
-        if data is None or len(data.close_prices) < 20:
-            logger.debug("Skipping %s (insufficient data or unavailable)", ticker)
-            return None
+        # 1. Ingest Market Data
+        data: MarketData = connector.fetch_market_data(ticker)
 
-        # 1. RuleEngine Evaluation with automated exchange mapping & dollar volume
-        profile = build_profile_from_market_data(
-            ticker=ticker,
-            market_cap=data.market_cap or 25_000_000_000.0,
-            net_income_ttm=data.net_income_ttm if data.net_income_ttm is not None else 100_000_000.0,
-            net_income_mrq=data.net_income_q1 if data.net_income_q1 is not None else 25_000_000.0,
-            exchange=data.exchange or "NASDAQ",
-            public_float_pct=0.75,
-            closes=data.close_prices,
-            volumes=data.volumes,
-            latest_price=data.latest_close,
-            avg_daily_volume_shares=data.avg_volume_10d,
-        )
-        rule_res = rule_engine.evaluate(profile, closes=data.close_prices, volumes=data.volumes)
+        # 2. RuleEngine S&P 500 Eligibility Verification
+        profile = build_profile_from_market_data(data)
+        rule_res: EligibilityResult = RuleEngine.evaluate(profile)
+
         if rule_res.is_eligible:
             qualified_count += 1
 
-        # 2. IndicatorEngine Calculations (Pandas warning-free .iloc[] indexing)
-        indicators = indicator_engine.calculate(
+        # 3. IndicatorEngine 250-bar calculations
+        indicators: IndicatorMetrics = indicator_engine.calculate(
             ticker=ticker,
-            closes=data.close_prices,
-            highs=data.high_prices,
-            lows=data.low_prices,
+            close_prices=data.close_prices,
+            high_prices=data.high_prices,
+            low_prices=data.low_prices,
             volumes=data.volumes,
         )
 
-        # 3. ScoringEngine Multi-Factor Evaluation & Gatekeeper
+        # Store latest quote for portfolio tracking & audit
+        latest_quotes[ticker] = {
+            "current_price": indicators.latest_close,
+            "close": indicators.latest_close,
+            "high": indicators.high_52w,
+            "low": indicators.latest_close * 0.98,
+            "volume": indicators.volume_metrics.avg_volume_50d,
+            "ma50": indicators.technical_trend.ma50,
+            "avg_volume_50d": indicators.volume_metrics.avg_volume_50d,
+        }
+
+        # 4. ScoringEngine Multi-Factor Evaluation & Gatekeeper
         score_payload = scoring_engine.calculate_score(
             indicators=indicators,
             rule_result=rule_res,
             short_interest_pct=data.short_interest_pct,
         )
 
-        # 4. Enhanced Risk Guard & Volatility Position Sizing (Sprint 4)
+        # 5. Enhanced Risk Guard & Volatility Position Sizing
         risk_plan: Optional[RiskPlan] = None
         if score_payload.tier in ["STRONG_RISING_STAR", "EMERGING_CANDIDATE"] or score_payload.is_buy_alert:
             risk_plan = risk_guard.compute_position_sizing(
@@ -220,7 +232,7 @@ def run_pipeline(
             "timestamp": datetime.utcnow().isoformat(),
         }
 
-        # 5. Telegram Alert Dispatching on Confirmed BUY ALERT (Sprint 4)
+        # 6. Telegram Alert Dispatching on Confirmed BUY ALERT
         if send_telegram and score_payload.is_buy_alert:
             buy_alerts.append(record)
             notification_hub.send_buy_alert(
@@ -229,6 +241,20 @@ def run_pipeline(
                 indicators=indicators,
                 risk=risk_plan,
             )
+
+        # 7. Paper Trading Execution
+        if portfolio_tracker and score_payload.is_buy_alert and risk_plan:
+            # Check if position already open for ticker
+            already_open = any(
+                p.ticker == ticker and p.status == "OPEN" for p in portfolio_tracker.positions.values()
+            )
+            if not already_open and risk_plan.suggested_shares > 0:
+                portfolio_tracker.open_position(
+                    ticker=ticker,
+                    entry_price=indicators.latest_close,
+                    shares=risk_plan.suggested_shares,
+                    risk_plan=risk_plan,
+                )
 
         return record
 
@@ -245,7 +271,24 @@ def run_pipeline(
 
     elapsed_total = round(time.time() - start_ts, 2)
 
-    # 6. Telegram End-of-Run Daily Summary Digest (Sprint 4)
+    # 8. Audit Active Paper Portfolio
+    if portfolio_tracker:
+        logger.info("Auditing active paper portfolio positions against latest quotes...")
+        audit_events = portfolio_tracker.audit_positions(latest_quotes)
+        summary = portfolio_tracker.get_summary()
+        print("\n" + "=" * 80)
+        print("          SIMULATED PAPER TRADING PORTFOLIO SUMMARY          ")
+        print("=" * 80)
+        print(f"Total Account Value:  ${summary.total_account_value:,.2f}")
+        print(f"Cash Available:       ${summary.cash:,.2f}")
+        print(f"Invested Capital:     ${summary.invested_capital:,.2f}")
+        print(f"Unrealized P&L:       ${summary.total_unrealized_pnl_dollars:+,.2f}")
+        print(f"Realized P&L:         ${summary.total_realized_pnl_dollars:+,.2f}")
+        print(f"Open Positions:       {summary.open_positions_count}")
+        print(f"Closed Positions:     {summary.closed_positions_count} (Win Rate: {summary.win_rate_pct:.1f}%)")
+        print("=" * 80 + "\n")
+
+    # 9. Telegram End-of-Run Daily Summary Digest
     if send_telegram and results:
         top_cands = results[:10]
         notification_hub.send_daily_digest(
@@ -256,7 +299,7 @@ def run_pipeline(
             elapsed_seconds=elapsed_total,
         )
 
-    # Export scan results
+    # 10. Export scan results
     try:
         with open(output_json, "w", encoding="utf-8") as f:
             json.dump({
@@ -294,7 +337,9 @@ def run_pipeline(
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Headless Rising Star Trend Engine Runner (Sprint 4)")
+    parser = argparse.ArgumentParser(
+        description="Headless Rising Star Trend Engine Runner (Sprint 5: Backtesting, Automation & Portfolio)",
+    )
     parser.add_argument("--sp500", action="store_true", help="Scan the complete S&P 500 index constituent universe")
     parser.add_argument("--watchlist", default="watchlist.csv", help="Path to custom watchlist CSV")
     parser.add_argument("--limit", type=int, default=None, help="Limit number of tickers to analyze")
@@ -303,6 +348,8 @@ def main():
     parser.add_argument("--risk-pct", type=float, default=1.0, help="Risk percentage per trade (default 1.0%)")
     parser.add_argument("--batch-size", type=int, default=25, help="Batch size for market scanning (default 25)")
     parser.add_argument("--no-telegram", action="store_true", help="Disable Telegram alerts")
+    parser.add_argument("--no-paper", action="store_true", help="Disable paper portfolio tracking")
+    parser.add_argument("--portfolio-file", default="portfolio.json", help="Path to portfolio JSON file")
     args = parser.parse_args()
 
     run_pipeline(
@@ -314,6 +361,8 @@ def main():
         risk_per_trade_pct=args.risk_pct,
         batch_size=args.batch_size,
         send_telegram=not args.no_telegram,
+        enable_paper_trading=not args.no_paper,
+        portfolio_file=args.portfolio_file,
     )
 
 

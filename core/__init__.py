@@ -1,9 +1,9 @@
 """
-Rising Star Trend Engine - Core Micro-Modules (Sprint 3: ScoringEngine & RiskGuard)
-Strictly headless pure backend logic.
+Rising Star Trend Engine - Core Micro-Modules
+Strictly headless pure backend logic, Pydantic v2 validated.
 """
 
-from .dataconnector import DataConnector
+from .dataconnector import DataConnector, MarketData
 from .ruleengine import RuleEngine, CompanyProfile, EligibilityResult
 from .indicatorengine import IndicatorEngine, IndicatorMetrics, TechnicalTrend, VolumeMetrics
 from .scoringengine import (
@@ -16,9 +16,12 @@ from .scoringengine import (
 from .riskguard import RiskGuard, PositionState, RiskStatusPayload, RiskPlan
 from .notificationhub import NotificationHub
 from .universe import fetch_sp500_tickers, BatchMarketScanner, FALLBACK_SP500_TICKERS
+from .backtester import BacktestEngine, BacktestConfig, BacktestTrade, BacktestResult, EquityCurvePoint
+from .portfoliotracker import PortfolioTracker, PaperPosition, PortfolioSummary
 
 __all__ = [
     "DataConnector",
+    "MarketData",
     "RuleEngine",
     "CompanyProfile",
     "EligibilityResult",
@@ -39,5 +42,12 @@ __all__ = [
     "fetch_sp500_tickers",
     "BatchMarketScanner",
     "FALLBACK_SP500_TICKERS",
+    "BacktestEngine",
+    "BacktestConfig",
+    "BacktestTrade",
+    "BacktestResult",
+    "EquityCurvePoint",
+    "PortfolioTracker",
+    "PaperPosition",
+    "PortfolioSummary",
 ]
-
