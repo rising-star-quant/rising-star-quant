@@ -314,6 +314,97 @@ def test_indicator_250_bars_accumulation():
     assert metrics.volume_metrics.institutional_accumulation is True
     assert metrics.volume_metrics.up_down_volume_ratio >= 1.30`,
   },
+  universe: {
+    filename: 'universe.py',
+    path: 'core/universe.py',
+    description: 'S&P 500 universe retrieval, local caching, and batch market scanning',
+    language: 'python',
+    content: `"""
+Rising Star Trend Engine - Sprint 4: Universe & Watchlist Integration
+S&P 500 constituent retrieval, local caching, and resilient batch processing.
+"""
+from core.universe import fetch_sp500_tickers, BatchMarketScanner
+
+# 1. Fetch S&P 500 constituents with automated caching & fallback
+tickers = fetch_sp500_tickers(cache_path="sp500_tickers_cache.json")
+
+# 2. Resilient batch processing with rate-limit pacing
+scanner = BatchMarketScanner(batch_size=25, batch_delay_seconds=0.4)
+results, stats = scanner.process_universe(tickers, processor_fn=process_ticker)`,
+  },
+  riskguard: {
+    filename: 'riskguard.py',
+    path: 'core/riskguard.py',
+    description: 'ATR-based dynamic stop-loss, profit targets (1R-5R), and volatility position sizing',
+    language: 'python',
+    content: `"""
+Rising Star Trend Engine - Sprint 4: Enhanced RiskGuard & Volatility Sizing
+Computes 14-day ATR stops, 1R/2R/3R/5R profit targets, and share size recommendations.
+"""
+from core.riskguard import RiskGuard, RiskPlan
+
+guard = RiskGuard(
+    default_account_equity=100_000.0,
+    default_risk_per_trade_pct=1.0,  # 1% risk = $1,000 budget
+    default_atr_multiplier=2.0,      # 2.0x ATR dynamic stop
+    max_position_size_pct=20.0,      # Max 20% portfolio allocation
+)
+
+plan: RiskPlan = guard.compute_position_sizing(
+    ticker="CRWD",
+    entry_price=320.0,
+    highs=high_prices,
+    lows=low_prices,
+    closes=close_prices,
+)
+print(f"Stop: \${plan.stop_loss_price} | 2R Target: \${plan.target_2r} | Size: {plan.suggested_shares} shares")`,
+  },
+  notificationhub: {
+    filename: 'notificationhub.py',
+    path: 'core/notificationhub.py',
+    description: 'Telegram trade alert automation (Actionable Buy Alert cards and daily summary digest)',
+    language: 'python',
+    content: `"""
+Rising Star Trend Engine - Sprint 4: NotificationHub Telegram Automation
+Dispatches rich HTML Buy Alert cards and nightly scan summary digests.
+"""
+from core.notificationhub import NotificationHub
+
+hub = NotificationHub(
+    bot_token=os.getenv("TELEGRAM_BOT_TOKEN"),
+    chat_id=os.getenv("TELEGRAM_CHAT_ID"),
+)
+
+# 1. Dispatch individual Buy Alert with ATR levels & position sizing
+hub.send_buy_alert(ticker="NVDA", score=score_payload, indicators=indicators, risk=risk_plan)
+
+# 2. Dispatch end-of-run daily summary digest
+hub.send_daily_digest(
+    total_scanned=503,
+    qualified_count=48,
+    buy_alerts_count=3,
+    top_candidates=top_results,
+    elapsed_seconds=38.4,
+)`,
+  },
+  main_py: {
+    filename: 'main.py',
+    path: 'main.py',
+    description: 'Main production pipeline: S&P 500 scanning, scoring, ATR sizing & Telegram alerts',
+    language: 'python',
+    content: `"""
+Rising Star Trend Engine - Sprint 4: Headless CLI Orchestration Pipeline
+python main.py --sp500 --equity 100000 --risk-pct 1.0 --batch-size 25
+"""
+# Full market integration:
+# 1. Loads S&P 500 constituent universe or watchlist
+# 2. Batch ingestion with rate-limiting pacing & error isolation
+# 3. RuleEngine S&P 500 eligibility evaluation
+# 4. IndicatorEngine 250-bar momentum & breakouts
+# 5. ScoringEngine composite ranking & Backtest Gatekeeper
+# 6. RiskGuard 14d ATR stops, profit targets & share sizing
+# 7. NotificationHub Telegram Buy Alert cards & nightly digest`,
+  },
   workflow: {
     filename: 'run_engine.yml',
     path: '.github/workflows/run_engine.yml',
@@ -340,9 +431,10 @@ jobs:
       - env:
           TELEGRAM_BOT_TOKEN: \${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: \${{ secrets.TELEGRAM_CHAT_ID }}
-        run: python main.py`,
+        run: python main.py --sp500`,
   },
 };
+
 
 export default function App() {
   const [selectedKey, setSelectedKey] = useState<string>('ruleengine');

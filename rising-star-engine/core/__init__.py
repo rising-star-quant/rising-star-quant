@@ -1,5 +1,5 @@
 """
-Rising Star Trend Engine - Core Micro-Modules (Sprint 3: ScoringEngine & RiskGuard)
+Rising Star Trend Engine - Core Micro-Modules (Sprint 3 & 4)
 Strictly headless pure backend logic.
 """
 
@@ -13,8 +13,9 @@ from .scoringengine import (
     HistoricalSignal,
     GatekeeperResult,
 )
-from .riskguard import RiskGuard, PositionState, RiskStatusPayload
+from .riskguard import RiskGuard, PositionState, RiskStatusPayload, RiskPlan
 from .notificationhub import NotificationHub
+from .universe import fetch_sp500_tickers, BatchMarketScanner, FALLBACK_SP500_TICKERS
 
 __all__ = [
     "DataConnector",
@@ -33,5 +34,9 @@ __all__ = [
     "RiskGuard",
     "PositionState",
     "RiskStatusPayload",
+    "RiskPlan",
     "NotificationHub",
+    "fetch_sp500_tickers",
+    "BatchMarketScanner",
+    "FALLBACK_SP500_TICKERS",
 ]
